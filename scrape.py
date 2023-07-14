@@ -1,22 +1,24 @@
 import os
-import requests
 import dataset
-import urllib
-from itertools import count
-from urlparse import urljoin
+import urllib.parse
+import requests
 from lxml import html
-from datetime import datetime, timedelta
 from slugify import slugify
 from werkzeug.utils import secure_filename
+from datetime import datetime, timedelta
+from typing import Dict
+from itertools import count
 
+# Constants
 INDUSTRIES = '046,047,005,006,058,025'
 TO_DATE = datetime.utcnow()
-FROM_DATE = TO_DATE - timedelta(days=10 * 365)
 FROM_DATE = TO_DATE - timedelta(days=10 * 365)
 
 SEARCH_PAGE = 'http://www.sedar.com/search/search_form_pc_en.htm'
 RESULT_PAGE = 'http://www.sedar.com/FindCompanyDocuments.do'
-PARAMS = {
+
+# Preparing search parameters
+PARAMS: Dict[str, str] = {
     'lang': 'EN',
     'page_no': 2,
     'company_search': 'All (or type a name)',
@@ -31,32 +33,36 @@ PARAMS = {
     'Variable': 'Issuer'
 }
 
-print PARAMS
+# Database connection
 engine = dataset.connect('postgresql://localhost/sedar')
 filing = engine['filing']
 company = engine['company']
 sess = {}
 
 
-def chomp_name(key):
+def chomp_name(key: str) -> str:
+    """
+    Transforms a string to a slug and replaces "-" with "_" and trims "_" from ends.
+
+    :param key: The string to be transformed
+    :return: Transformed string
+    """
     return slugify(key).replace('-', '_').strip('_')
 
 
-def get_industries():
-    res = requests.get(SEARCH_PAGE)
-    doc = html.fromstring(res.content)
-    for opt in doc.findall('.//select[@name="industry_group"]/option'):
-        print opt.get('value'), ' -> ', opt.text_content().strip()
+def get_company(url: str) -> None:
+    """
+    Scrapes and stores company data from a given url.
 
-
-def get_company(url):
+    :param url: Url to the company's page
+    """
     if company.find_one(url=url):
         return
     res = requests.get(url)
     doc = html.fromstring(res.content)
     content = doc.find('.//div[@id="content"]')
     data = {'url': url, 'name': content.findtext('.//td/font/strong')}
-    print 'Company', [data['name']]
+    print(f'Company: {data["name"]}')
     key = None
     for row in content.findall('.//td'):
         if row.get('class') == 'bt':
@@ -64,20 +70,24 @@ def get_company(url):
         elif row.get('class') == 'rt' and key is not None:
             data[key] = row.text
             key = None
-        #print url, html.tostring(row)
     company.upsert(data, ['url'])
 
 
-def download_document(form):
+def download_document(form: str) -> str:
+    """
+    Downloads a document from a form action url.
+
+    :param form: Form action url
+    :return: Local path to the downloaded file
+    """
     file_name = form.split('/filings/', 1)[-1]
     filing_id, doc_id, rest = file_name.split('/', 2)
-    rest = secure_filename(urllib.unquote(rest))
+    rest = secure_filename(urllib.parse.unquote(rest))
     file_name = os.path.join('filings', filing_id, doc_id, rest)
     if os.path.exists(file_name):
         return file_name
 
-    from breaker import make_cracked_session
-    print "Downloading", [form]
+    print(f"Downloading: {form}")
     if 'ca' not in sess or sess['ca'] is None:
         sess['ca'] = make_cracked_session()
 
@@ -87,10 +97,7 @@ def download_document(form):
         sess['ca'] = make_cracked_session()
         return download_document(form)
 
-    try:
-        os.makedirs(os.path.dirname(file_name))
-    except:
-        pass
+    os.makedirs(os.path.dirname(file_name), exist_ok=True)
 
     with open(file_name, 'wb') as fh:
         fh.write(res.content)
@@ -98,7 +105,10 @@ def download_document(form):
     return file_name
 
 
-def load_filings():
+def load_filings() -> None:
+    """
+    Loads filings from a page until no more filings are found.
+    """
     for i in count(1):
         page_hits = 0
         params = PARAMS.copy()
@@ -111,12 +121,11 @@ def load_filings():
             if len(cells) < 6:
                 continue
             submit = cells[3].getchildren()[0].get('action')
-            #print cells, html.tostring(row)
             if submit is None:
                 continue
             page_hits += 1
             filing_id = submit.split('fileName=', 1)[-1]
-            print 'Filing', [filing_id]
+            print(f'Filing: {filing_id}')
             form = urljoin(RESULT_PAGE, submit)
             file_name = download_document(form)
             data = {
@@ -138,4 +147,5 @@ def load_filings():
             return
 
 
-load_filings()
+if __name__ == "__main__":
+    load_filings()
